@@ -1,0 +1,177 @@
+#include <Arduino.h>
+#include <EEPROM.h>
+#include <SPI.h>
+#include <LoRa.h>
+
+#define LORA_SS   15
+#define LORA_RST  16
+#define LORA_DIO0 2
+#define LORA_FREQ 433E6
+
+#define EMPTY_PIN   5      
+#define FULL_PIN    4      
+//#define LED_PIN   2
+
+
+#define EEPROM_SIZE  8
+#define STATE_ADDR   0
+#define COUNTER_ADDR 4
+
+
+#define ACK_TIMEOUT  4000   // 3s
+#define MAX_RETRY 3
+
+//uint8_t lastState = STATE_WAIT_FULL;
+uint32_t counter = 0;
+
+
+bool sendAndWaitAck(String txMsg);
+
+void setup() {
+  Serial.begin(115200);     
+  delay(500); 
+   Serial.flush();   
+  pinMode(EMPTY_PIN, INPUT_PULLUP);
+  pinMode(FULL_PIN, INPUT_PULLUP);
+  
+  
+  bool emptyActive = (digitalRead(EMPTY_PIN) == LOW);
+  bool fullActive  = (digitalRead(FULL_PIN) == LOW);
+  bool nonemptyActive = (digitalRead(EMPTY_PIN) == HIGH); 
+  bool nonfullActive  = (digitalRead(FULL_PIN) == HIGH);
+
+   EEPROM.begin(EEPROM_SIZE);
+  EEPROM.get(COUNTER_ADDR, counter); 
+  if (counter == 0xFFFFFFFF) { 
+    counter = 0;
+  }
+
+  Serial.println("\n===== SYSTEM START =====");
+  //Serial.println(lastState == STATE_WAIT_EMPTY ? "WAIT_EMPTY" : "WAIT_FULL");
+
+  LoRa.setPins(LORA_SS, LORA_RST, LORA_DIO0);
+  if (!LoRa.begin(LORA_FREQ)) {
+    Serial.println("LoRa INIT FAIL");
+    while (1);
+  }
+
+  LoRa.setSpreadingFactor(12);
+  LoRa.setSignalBandwidth(62.5E3);
+  LoRa.setCodingRate4(8);
+  LoRa.enableCrc();
+  delay(50);
+  Serial.println("LoRa INIT OK");
+
+
+// EMPTY
+    if (nonemptyActive && nonfullActive ) {
+    Serial.println("EVENT: TANK EMPTY");  
+   
+    if (sendAndWaitAck("ALERT: TANK EMPTY " + String(counter))) {
+      //lastState = STATE_WAIT_FULL;
+
+      counter++;
+       //EEPROM.write(STATE_ADDR);
+      EEPROM.put(COUNTER_ADDR, counter); // Counter save karein
+      EEPROM.commit();
+    }
+    delay(50);
+  }
+
+  // FULL 
+ else if (fullActive  && nonemptyActive ) {  // else if (fullActive  && nonemptyActive ) {
+    Serial.println("EVENT: TANK FULL");    
+  
+    if (sendAndWaitAck("ALERT: TANK FULL " + String(counter))) {
+     //lastState = STATE_WAIT_EMPTY;
+    
+      counter++;
+       //EEPROM.write(STATE_ADDR);
+      EEPROM.put(COUNTER_ADDR, counter); // Counter save karein
+      EEPROM.commit();
+    }
+    delay(50);
+  }
+  delay(2000);
+    Serial.println(" LoRa going in deepsleep...");
+   LoRa.sleep(); 
+    Serial.println(" ESP Going to deep sleep now...");
+ Serial.flush();
+ delay(100); 
+Serial.begin(74880);  
+//Please print the baud rate is reflected or not before sleep
+  long currentBaud = Serial.baudRate(); 
+  Serial.print("Current Baud Rate: ");
+  Serial.println(currentBaud);
+Serial.flush();
+ ESP.deepSleep(0); 
+ 
+}
+
+void loop() {
+ 
+}
+
+bool sendAndWaitAck(String txMsg) {
+  bool ackReceived = false;
+    int retryCount = 0;
+    while (retryCount <= MAX_RETRY && !ackReceived) {
+  Serial.println("Sending TX: " + txMsg);
+
+  LoRa.beginPacket();
+  LoRa.print(txMsg);
+  LoRa.endPacket();
+
+  unsigned long startTime = millis();
+
+  while (millis() - startTime < ACK_TIMEOUT) {
+    yield();
+    int packetSize = LoRa.parsePacket();
+    if (packetSize) {
+      String incoming = "";
+      while (LoRa.available()) {
+        incoming += (char)LoRa.read();
+      }
+
+      Serial.println("Received ACK: " + incoming);
+      
+      if (incoming.indexOf("ACK For Motor ONN") != -1) {
+        Serial.println("Motor ON confirmed");
+        //digitalWrite(LED_PIN, LOW);
+        ackReceived = true;
+        break;
+      }
+
+      if (incoming.indexOf("ACK For Motor OFF") != -1) {
+        Serial.println("Motor OFF confirmed");
+        //digitalWrite(LED_PIN, HIGH);
+        ackReceived = true;
+        break;
+      }
+    }
+  }
+    if (!ackReceived) {
+      Serial.println("No ACK.. Retry " + String(retryCount));
+      retryCount++;
+      
+    }
+  }
+
+  if (!ackReceived) {
+  Serial.println("ACK failed after 3 retries");
+  
+
+  for (int i = 0; i <= 3; i++) {
+    LoRa.beginPacket();
+    LoRa.print("CMD_MOTOR_OFF_FORCE");
+    LoRa.endPacket();
+    delay(50);   // small gap (imp)
+  }
+  Serial.println("FORCING MOTOR OFF");
+  //digitalWrite(LED_PIN, HIGH);
+}
+  //counter++;
+  
+  return ackReceived; 
+}
+
